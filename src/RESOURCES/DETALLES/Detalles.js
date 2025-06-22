@@ -506,7 +506,7 @@ const Detalles = ({ order, closeModal }) => {
     const { date, period } = determineDateAndShift();
     const docId = date;
 
-    // 1. Eliminar el pedido del domiciliario anterior
+    // 1. Eliminar el pedido del domiciliario anterior (solo el pedido, no todo el periodo ni el domiciliario)
     const domicilioDoc = doc(db, 'DOMICILIOS', docId);
     const domicilioSnapshot = await getDoc(domicilioDoc);
 
@@ -523,31 +523,13 @@ const Detalles = ({ order, closeModal }) => {
             ? order.idPedido
             : order.id;
 
-        const pathToOrder = `${order.domiciliario}.${period}.${prevId}`;
+        // Solo elimina el pedido específico
         const updates = {
-          [pathToOrder]: deleteField()
+          [`${order.domiciliario}.${period}.${prevId}`]: deleteField()
         };
 
-        // Verificar si queda vacío el turno (ej: MORNING)
-        const periodOrders = domicilioData[order.domiciliario][period];
-        delete periodOrders[prevId];
-
-        if (Object.keys(periodOrders).length === 0) {
-          updates[`${order.domiciliario}.${period}`] = deleteField();
-        }
-
-        // Verificar si queda vacío el domiciliario
-        const domiciliarioData = domicilioData[order.domiciliario];
-        delete domiciliarioData[period];
-
-        if (
-          domicilioData[order.domiciliario] &&
-          Object.keys(domicilioData[order.domiciliario]).length === 0
-        ) {
-          updates[`${order.domiciliario}`] = deleteField();
-        }
-
         await updateDoc(domicilioDoc, updates);
+        // No eliminar el periodo ni el domiciliario aunque queden vacíos, para no borrar balances u otros datos
       }
     }
 

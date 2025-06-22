@@ -5,13 +5,13 @@ import './Empleados.css';
 import { db } from '../firebase';
 import { doc, setDoc, collection, getDocs, query, orderBy, limit, deleteDoc } from 'firebase/firestore';
 import ConfirmationDelete from '../RESOURCES/THEMES/CONFIRMATIONDELETE/ConfirmationDelete';
-import { FaEdit, FaTrash } from 'react-icons/fa'; // Import icons
+import { FaEdit, FaTrash } from 'react-icons/fa';
 import { getAuth, createUserWithEmailAndPassword } from 'firebase/auth';
 
 const formatPrice = (value) => {
   if (value === null || value === undefined || value === '') return '0';
   const stringValue = value.toString();
-  const numberValue = parseFloat(stringValue.replace(/[$,]/g, ''));
+  const numberValue = parseFloat(stringValue.replace(/[$,]/g, '')) || 0;
   return `$${numberValue.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 };
 
@@ -21,6 +21,7 @@ const Empleados = ({ modalVisible, closeModal }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [deleteId, setDeleteId] = useState(null);
+  const [isEditing, setIsEditing] = useState(false); // nuevo estado para distinguir editar vs crear
 
   useEffect(() => {
     if (modalVisible) {
@@ -34,10 +35,11 @@ const Empleados = ({ modalVisible, closeModal }) => {
       const q = query(collection(db, 'EMPLEADOS'), orderBy('id', 'desc'), limit(1));
       const querySnapshot = await getDocs(q);
       let lastId = 0;
-      querySnapshot.forEach((doc) => {
-        lastId = parseInt(doc.data().id, 10);
+      querySnapshot.forEach((d) => {
+        const val = parseInt(d.data().id, 10);
+        if (!isNaN(val)) lastId = val;
       });
-      setEmpleado((prevEmpleado) => ({ ...prevEmpleado, id: (lastId + 1).toString().padStart(8, '0') }));
+      setEmpleado((prev) => ({ ...prev, id: (lastId + 1).toString().padStart(8, '0') }));
     } catch (error) {
       console.error('Error fetching last empleado ID:', error);
     }
@@ -48,8 +50,8 @@ const Empleados = ({ modalVisible, closeModal }) => {
       const q = query(collection(db, 'EMPLEADOS'), orderBy('id', 'asc'));
       const querySnapshot = await getDocs(q);
       const items = [];
-      querySnapshot.forEach((doc) => {
-        items.push(doc.data());
+      querySnapshot.forEach((d) => {
+        items.push(d.data());
       });
       setEmpleados(items);
     } catch (error) {
@@ -59,12 +61,12 @@ const Empleados = ({ modalVisible, closeModal }) => {
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
-    setEmpleado({ ...empleado, [name]: value });
+    setEmpleado((prev) => ({ ...prev, [name]: value }));
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    const { role, name, phone, address, salary, scheduleStart, scheduleEnd, email } = empleado;
+    const { role, name, phone, address, salary, scheduleStart, scheduleEnd, email, phoneCountryCode, id } = empleado;
 
     if (role === 'CLIENTE') {
       if (!name || !phone || !address || !email) {
@@ -79,30 +81,53 @@ const Empleados = ({ modalVisible, closeModal }) => {
     }
 
     try {
-      // Registrar en Firebase Authentication
-      const auth = getAuth();
-      const password = email.split('@')[0];
-      await createUserWithEmailAndPassword(auth, email, password);
-      const { phoneCountryCode, ...empleadoData } = empleado;
+      // Primero grabar en Firestore
       const formattedEmpleado = {
-        ...empleadoData,
-        phone: `${empleado.phoneCountryCode}${empleado.phone.replace(empleado.phoneCountryCode, '')}`,
-        salary: empleado.salary.replace(/[^0-9.]/g, ''),
-        schedule: `${empleado.scheduleStart}-${empleado.scheduleEnd}`
+        id,
+        name,
+        role,
+        phone: `${phoneCountryCode}${phone}`,
+        address,
+        salary: (salary || '').toString().replace(/[^0-9.]/g, ''),
+        schedule: `${scheduleStart}-${scheduleEnd}`,
+        email
       };
-      await setDoc(doc(db, "EMPLEADOS", empleado.id), formattedEmpleado);
+
+      await setDoc(doc(db, "EMPLEADOS", id), formattedEmpleado);
+
+      // Si estamos creando (no editando), entonces crear la cuenta en Auth
+      if (!isEditing) {
+        try {
+          const auth = getAuth();
+          const password = email.split('@')[0] || 'password';
+          await createUserWithEmailAndPassword(auth, email, password);
+        } catch (authError) {
+          // Si falla la creación en Auth, eliminar el documento en Firestore (rollback)
+          try {
+            await deleteDoc(doc(db, 'EMPLEADOS', id));
+          } catch (delErr) {
+            console.error('Error al hacer rollback (eliminar doc):', delErr);
+          }
+          throw authError; // para que el catch externo muestre el error
+        }
+      }
+
       toast.success("Empleado registrado correctamente");
       fetchEmpleados();
       handleBack();
     } catch (error) {
+      console.error('Error al registrar empleado:', error);
+      toast.error('Error al registrar empleado: ' + (error.message || ''));
     }
   };
 
   const handleEdit = (item) => {
-    const [scheduleStart, scheduleEnd] = item.schedule.split('-');
-    const phoneCountryCode = item.phone.slice(0, item.phone.indexOf(item.phone.match(/\d/)));
-    const phone = item.phone.slice(item.phone.indexOf(item.phone.match(/\d/)));
-    setEmpleado({ ...item, scheduleStart, scheduleEnd, phoneCountryCode, phone });
+    const [scheduleStart = '', scheduleEnd = ''] = (item.schedule || '').split('-');
+    const phoneCountryCodeMatch = item.phone ? item.phone.match(/^(\+\d{1,3})/) : null;
+    const phoneCountryCode = phoneCountryCodeMatch ? phoneCountryCodeMatch[1] : '+1';
+    const phone = item.phone ? item.phone.replace(phoneCountryCode, '') : '';
+    setEmpleado({ id: item.id || '', name: item.name || '', role: item.role || '', phone, phoneCountryCode, address: item.address || '', salary: item.salary || '', scheduleStart, scheduleEnd, email: item.email || '' });
+    setIsEditing(true);
     setIsAdding(true);
   };
 
@@ -132,13 +157,15 @@ const Empleados = ({ modalVisible, closeModal }) => {
 
   const handleBack = () => {
     setIsAdding(false);
+    setIsEditing(false);
     setEmpleado({ id: '', name: '', role: '', phone: '', phoneCountryCode: '+1', address: '', salary: '', scheduleStart: '', scheduleEnd: '', email: '' });
   };
 
   const handleAdd = () => {
     fetchLastEmpleadoId();
     setIsAdding(true);
-    setEmpleado({ id: '', name: '', role: '', phone: '', phoneCountryCode: '+1', salary: '', scheduleStart: '', scheduleEnd: '', email: '' });
+    setIsEditing(false);
+    setEmpleado({ id: '', name: '', role: '', phone: '', phoneCountryCode: '+1', address: '', salary: '', scheduleStart: '', scheduleEnd: '', email: '' });
   };
 
   const handleCloseModal = () => {
@@ -167,150 +194,94 @@ const Empleados = ({ modalVisible, closeModal }) => {
             <div className="empleados-modal-content">
               <span className="empleados-close" onClick={handleCloseModal}>&times;</span>
               <h2 className="modal-header">Administrar Empleados</h2>
+
               {isAdding ? (
-                <>
-                  <form className="empleados-form" onSubmit={handleSubmit}>
-                    <div className="empleados-form-group">
-                      <label className="empleados-label">ID:</label>
-                      <input
-                        className="empleados-input"
-                        type="text"
-                        name="id"
-                        value={empleado.id}
-                        onChange={handleInputChange}
-                        readOnly
-                      />
-                    </div>
-                    <div className="empleados-form-group">
-                      <label className="empleados-label">Nombre:</label>
-                      <input
-                        className="empleados-input"
-                        type="text"
-                        name="name"
-                        value={empleado.name}
-                        onChange={handleInputChange}
-                        required
-                      />
-                    </div>
-                    <div className="empleados-form-group">
-                      <label className="empleados-label">Email:</label>
-                      <input
-                        className="empleados-input"
-                        type="email"
-                        name="email"
-                        value={empleado.email}
-                        onChange={handleInputChange}
-                        required
-                      />
-                    </div>
-                    <div className="empleados-form-group">
-                      <label className="empleados-label">Rol:</label>
-                      <select
-                        className="empleados-input"
-                        name="role"
-                        value={empleado.role}
-                        onChange={handleInputChange}
-                        required
-                      >
-                        <option value="">Seleccionar Rol</option>
-                        <option value="ADMINISTRADOR">ADMINISTRADOR</option>
-                        <option value="DOMICILIARIO">DOMICILIARIO</option>
-                        <option value="COCINERO">COCINERO</option>
-                        <option value="MESERO">MESERO</option>
+                <form className="empleados-form" onSubmit={handleSubmit}>
+                  <div className="empleados-form-group">
+                    <label className="empleados-label">ID:</label>
+                    <input className="empleados-input" type="text" name="id" value={empleado.id} onChange={handleInputChange} readOnly />
+                  </div>
+
+                  <div className="empleados-form-group">
+                    <label className="empleados-label">Nombre:</label>
+                    <input className="empleados-input" type="text" name="name" value={empleado.name} onChange={handleInputChange} required />
+                  </div>
+
+                  <div className="empleados-form-group">
+                    <label className="empleados-label">Email:</label>
+                    <input className="empleados-input" type="email" name="email" value={empleado.email} onChange={handleInputChange} required />
+                  </div>
+
+                  <div className="empleados-form-group">
+                    <label className="empleados-label">Rol:</label>
+                    <select className="empleados-input" name="role" value={empleado.role} onChange={handleInputChange} required>
+                      <option value="">Seleccionar Rol</option>
+                      <option value="ADMINISTRADOR">ADMINISTRADOR</option>
+                      <option value="DOMICILIARIO">DOMICILIARIO</option>
+                      <option value="COCINERO">COCINERO</option>
+                      <option value="MESERO">MESERO</option>
+                      <option value="CLIENTE">CLIENTE</option>
+                    </select>
+                  </div>
+
+                  <div className="empleados-form-group">
+                    <label className="empleados-label">Teléfono:</label>
+                    <div className="phone-container">
+                      <select className="phone-country-code" name="phoneCountryCode" value={empleado.phoneCountryCode} onChange={handleInputChange} required>
+                        <option value="+1">🇺🇸 +1</option>
+                        <option value="+52">🇲🇽 +52</option>
+                        <option value="+57">🇨🇴 +57</option>
+                        <option value="+58">🇻🇪 +58</option>
                       </select>
+                      <input className="empleados-input phone-number" type="text" name="phone" value={empleado.phone} onChange={handleInputChange} required />
                     </div>
+                  </div>
+
+                  {empleado.role === 'CLIENTE' && (
                     <div className="empleados-form-group">
-                      <label className="empleados-label">Teléfono:</label>
-                      <div className="phone-container">
-                        <select
-                          className="phone-country-code"
-                          name="phoneCountryCode"
-                          value={empleado.phoneCountryCode}
-                          onChange={handleInputChange}
-                          required
-                        >
-                          <option value="+1">🇺🇸 +1</option>
-                          <option value="+52">🇲🇽 +52</option>
-                          <option value="+57">🇨🇴 +57</option>
-                          <option value="+58">🇻🇪 +58</option>
-                          {/* Add more country codes as needed */}
-                        </select>
-                        <input
-                          className="empleados-input phone-number"
-                          type="text"
-                          name="phone"
-                          value={empleado.phone.replace(empleado.phoneCountryCode, '')}
-                          onChange={handleInputChange}
-                          required
-                        />
-                      </div>
+                      <label className="empleados-label">Dirección:</label>
+                      <input className="empleados-input" type="text" name="address" value={empleado.address} onChange={handleInputChange} required />
                     </div>
-                    {empleado.role === 'CLIENTE' && (
-                      <>
-                        <div className="empleados-form-group">
-                          <label className="empleados-label">Dirección:</label>
-                          <input
-                            className="empleados-input"
-                            type="text"
-                            name="address"
-                            value={empleado.address}
-                            onChange={handleInputChange}
-                            required
-                          />
+                  )}
+
+                  {empleado.role !== 'CLIENTE' && (
+                    <>
+                      <div className="empleados-form-group">
+                        <label className="empleados-label">Sueldo:</label>
+                        <input className="empleados-input" type="text" name="salary" value={formatPrice(empleado.salary)} onChange={handleInputChange} required />
+                      </div>
+
+                      <div className="empleados-form-group">
+                        <label className="empleados-label">Horario:</label>
+                        <div className="schedule-container">
+                          <select className="empleados-input schedule-select" name="scheduleStart" value={empleado.scheduleStart} onChange={handleInputChange} required>
+                            <option value="">ENTRADA</option>
+                            {generateTimeOptions().map((time) => (
+                              <option key={time} value={time}>{time}</option>
+                            ))}
+                          </select>
+                          <select className="empleados-input schedule-select" name="scheduleEnd" value={empleado.scheduleEnd} onChange={handleInputChange} required>
+                            <option value="">SALIDA</option>
+                            {generateTimeOptions().map((time) => (
+                              <option key={time} value={time}>{time}</option>
+                            ))}
+                          </select>
                         </div>
-                      </>
-                    )}
-                    {empleado.role !== 'CLIENTE' && (
-                      <>
-                        <div className="empleados-form-group">
-                          <label className="empleados-label">Sueldo:</label>
-                          <input
-                            className="empleados-input"
-                            type="text"
-                            name="salary"
-                            value={formatPrice(empleado.salary)}
-                            onChange={handleInputChange}
-                            required
-                          />
-                        </div>
-                        <div className="empleados-form-group">
-                          <label className="empleados-label">Horario:</label>
-                          <div className="schedule-container">
-                            <select
-                              className="empleados-input schedule-select"
-                              name="scheduleStart"
-                              value={empleado.scheduleStart}
-                              onChange={handleInputChange}
-                              required
-                            >
-                              <option value="">ENTRADA</option>
-                              {generateTimeOptions().map((time) => (
-                                <option key={time} value={time}>{time}</option>
-                              ))}
-                            </select>
-                            <select
-                              className="empleados-input schedule-select"
-                              name="scheduleEnd"
-                              value={empleado.scheduleEnd}
-                              onChange={handleInputChange}
-                              required
-                            >
-                              <option value="">SALIDA</option>
-                              {generateTimeOptions().map((time) => (
-                                <option key={time} value={time}>{time}</option>
-                              ))}
-                            </select>
-                          </div>
-                        </div>
-                      </>
-                    )}
+                      </div>
+                    </>
+                  )}
+
+                  <div className="form-actions">
                     <button className="empleados-button" type="submit">Guardar</button>
                     <button className="empleados-button" type="button" onClick={handleBack}>Atrás</button>
-                  </form>
-                </>
+                  </div>
+                </form>
               ) : (
                 <>
-                  <button className="empleados-button" onClick={handleAdd}>Agregar</button>
+                  <div className="list-actions">
+                    <button className="empleados-button" onClick={handleAdd}>Agregar</button>
+                  </div>
+
                   <div className="empleados-list">
                     {empleados.map((item) => (
                       <div key={item.id} className="empleados-item">
@@ -328,6 +299,7 @@ const Empleados = ({ modalVisible, closeModal }) => {
           </div>
         </>
       )}
+
       {showConfirmation && (
         <ConfirmationDelete
           title="Confirmar eliminación"
