@@ -6,7 +6,7 @@ import { db } from '../firebase';
 import { doc, setDoc, collection, getDocs, query, orderBy, limit, deleteDoc } from 'firebase/firestore';
 import ConfirmationDelete from '../RESOURCES/THEMES/CONFIRMATIONDELETE/ConfirmationDelete';
 import { FaEdit, FaTrash } from 'react-icons/fa';
-import { getAuth, createUserWithEmailAndPassword } from 'firebase/auth';
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'firebase/auth';
 
 const formatPrice = (value) => {
   if (value === null || value === undefined || value === '') return '0';
@@ -97,10 +97,22 @@ const Empleados = ({ modalVisible, closeModal }) => {
 
       // Si estamos creando (no editando), entonces crear la cuenta en Auth
       if (!isEditing) {
+        const auth = getAuth();
+        const password = email.split('@')[0] || 'password';
         try {
-          const auth = getAuth();
-          const password = email.split('@')[0] || 'password';
+          // Crear usuario en Auth (esto suele iniciar sesión automáticamente)
           await createUserWithEmailAndPassword(auth, email, password);
+
+          // Asegurarnos de que el inicio de sesión se realice SOLO después del guardado:
+          // Forzar sign-out si quedó autenticado y luego sign-in explícito.
+          try {
+            await signOut(auth);
+            await signInWithEmailAndPassword(auth, email, password);
+          } catch (signinErr) {
+            console.error('Error al forzar sign-out/sign-in:', signinErr);
+            // No hacemos rollback aquí; la cuenta ya fue creada correctamente.
+            toast.warn('Usuario creado, pero hubo un problema al iniciar sesión automáticamente.');
+          }
         } catch (authError) {
           // Si falla la creación en Auth, eliminar el documento en Firestore (rollback)
           try {
